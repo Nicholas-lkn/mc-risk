@@ -60,7 +60,7 @@ git clone https://github.com/Nicholas-lkn/mc-risk.git
 cd mc-risk
 uv sync --all-extras          # Python 3.12; extras: app, fast (Numba), data, notebooks
 
-uv run pytest                 # 112 tests, about 25 seconds
+uv run pytest                 # 114 tests, about 25 seconds
 uv run ruff check .
 
 # Real market data for the risk layer (not committed, see Design choices)

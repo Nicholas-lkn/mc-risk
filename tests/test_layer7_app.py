@@ -49,3 +49,17 @@ def test_streamlit_app_runs_without_exception():
     at = AppTest.from_file(str(app), default_timeout=60).run()
     assert not at.exception
     assert len(at.tabs) == 2 and len(at.metric) >= 8
+
+
+@pytest.mark.parametrize("model,payoff", [("Heston", "European put"), ("GBM", "American put")])
+def test_streamlit_pricer_handles_other_models_and_payoffs(model, payoff):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    app = Path(__file__).resolve().parents[1] / "src" / "mc_risk" / "app" / "streamlit_app.py"
+    at = AppTest.from_file(str(app), default_timeout=60).run()
+    at.selectbox[0].select(model).run()
+    at.selectbox[1].select(payoff).run()
+    assert not at.exception
+    assert at.selectbox[0].value == model and at.selectbox[1].value == payoff
+    assert float(at.metric[0].value) > 0
