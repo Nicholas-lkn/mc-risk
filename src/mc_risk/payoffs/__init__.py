@@ -31,4 +31,34 @@ def digital(k: float, option: str = "call") -> Payoff:
     return lambda paths: (sign * (paths[:, -1] - k) > 0).astype(float)
 
 
-__all__ = ["Payoff", "digital", "european"]
+def asian_arithmetic(k: float, option: str = "call") -> Payoff:
+    """Payoff on the arithmetic average of the monitoring dates (columns 1..n)."""
+    sign = _sign(option)
+    return lambda paths: np.maximum(sign * (paths[:, 1:].mean(axis=1) - k), 0.0)
+
+
+def asian_geometric(k: float, option: str = "call") -> Payoff:
+    """Payoff on the geometric average of the monitoring dates (columns 1..n)."""
+    sign = _sign(option)
+    return lambda paths: np.maximum(sign * (np.exp(np.log(paths[:, 1:]).mean(axis=1)) - k), 0.0)
+
+
+def down_and_out(k: float, barrier: float, option: str = "call") -> Payoff:
+    """Vanilla payoff that is lost if any monitoring date is at or below the barrier."""
+    sign = _sign(option)
+
+    def payoff(paths: np.ndarray) -> np.ndarray:
+        alive = paths[:, 1:].min(axis=1) > barrier
+        return np.maximum(sign * (paths[:, -1] - k), 0.0) * alive
+
+    return payoff
+
+
+__all__ = [
+    "Payoff",
+    "asian_arithmetic",
+    "asian_geometric",
+    "digital",
+    "down_and_out",
+    "european",
+]

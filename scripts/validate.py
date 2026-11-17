@@ -20,8 +20,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 
-from mc_risk import mc_price, price_european, variance_reduction_factor
-from mc_risk.analytic import bs_price
+from mc_risk import (
+    mc_price,
+    price_american_lsm,
+    price_asian,
+    price_down_and_out_call,
+    price_european,
+    variance_reduction_factor,
+)
+from mc_risk.analytic import (
+    bgk_adjusted_barrier,
+    bs_price,
+    crr_price,
+    down_and_out_call,
+    geometric_asian_discrete,
+    geometric_asian_kemna_vorst,
+)
 from mc_risk.payoffs import european
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -297,7 +311,209 @@ def layer2(rep: Report) -> None:
     )
 
 
-SECTIONS = [layer1, layer2]
+# --------------------------------------------------------------------------- layer 3
+def layer3(rep: Report) -> None:
+    rep.add("## 3. Exotics: Asian, barrier, American")
+    rep.add()
+    asian = {"s0": 100.0, "k": 100.0, "r": 0.03, "sigma": 0.2, "t": 1.0, "q": 0.01}
+    n_fix = 50
+
+    rep.add("### 3.1 Asian options")
+    rep.add()
+    rep.add(
+        f"Checked against: closed form for the discretely monitored geometric Asian ({n_fix} "
+        "fixings), which is exact on the simulated grid. The Kemna-Vorst continuous formula is "
+        "its limit and is shown for reference. S0=K=100, 200,000 paths."
+    )
+    rep.add()
+    rows = []
+    for option in ("call", "put"):
+        res = price_asian(
+            **asian, option=option, average="geometric", n_steps=n_fix, n_paths=200_000, seed=0
+        )
+        ref = geometric_asian_discrete(**asian, n_steps=n_fix, option=option)
+        rows.append(rep.price_row(f"geometric {option}", res, ref))
+    rep.table(PRICE_HEADERS, rows)
+    kv = geometric_asian_kemna_vorst(**asian)
+    disc_ref = geometric_asian_discrete(**asian, n_steps=n_fix)
+    rep.add(
+        f"Kemna-Vorst continuous call: {kv:.5f}; discrete call with {n_fix} fixings: "
+        f"{disc_ref:.5f}. The gap is the effect of discrete monitoring, not an error."
+    )
+    rep.add()
+    rep.add(
+        "The arithmetic Asian has no closed form. It is priced with the geometric Asian as "
+        "control variate; the check is that the independent plain estimate agrees."
+    )
+    rep.add()
+    plain = price_asian(**asian, n_steps=n_fix, n_paths=200_000, control_variate=False, seed=0)
+    cv = price_asian(**asian, n_steps=n_fix, n_paths=200_000, seed=1)
+    sob = price_asian(**asian, n_steps=n_fix, n_paths=2**17, method="sobol", seed=2)
+    arows = []
+    for name, res in (
+        ("Plain", plain),
+        ("Geometric control variate", cv),
+        ("Sobol + bridge + control variate", sob),
+    ):
+        arows.append(
+            [
+                name,
+                f"{res.price:.5f}",
+                f"{res.std_error:.6f}",
+                f"[{res.ci99[0]:.5f}, {res.ci99[1]:.5f}]",
+                f"{res.n_paths:,}",
+                f"{variance_reduction_factor(plain, res):,.0f}",
+                f"{res.runtime * 1e3:.0f}",
+            ]
+        )
+    rep.table(
+        ["Arithmetic call", "Price", "Std error", "99% CI", "Paths", "VRF", "Runtime (ms)"], arows
+    )
+    rep.table(
+        ["Check", "Value", "Expected", ""],
+        [
+            [
+                "Plain CI contains the control-variate price",
+                f"{cv.price:.5f} in [{plain.ci99[0]:.5f}, {plain.ci99[1]:.5f}]",
+                "yes",
+                rep.verdict(plain.contains(cv.price)),
+            ],
+            [
+                "Control-variate VRF",
+                f"{variance_reduction_factor(plain, cv):,.0f}",
+                "> 100",
+                rep.verdict(variance_reduction_factor(plain, cv) > 100),
+            ],
+            [
+                "Arithmetic price above geometric price (AM-GM)",
+                f"{cv.price:.5f} > {disc_ref:.5f}",
+                "yes",
+                rep.verdict(cv.ci99[0] > disc_ref),
+            ],
+        ],
+    )
+    rep.summary.append(
+        [
+            "Arithmetic Asian call",
+            "Geometric Asian closed form (control)",
+            f"{rows[0][3]} (geometric)",
+            f"{cv.std_error:.6f}",
+            f"CV VRF {variance_reduction_factor(plain, cv):,.0f}x",
+        ]
+    )
+
+    rep.add("### 3.2 Down-and-out barrier call")
+    rep.add()
+    s0, k, h, r, sigma, t, q = 100.0, 100.0, 90.0, 0.03, 0.2, 1.0, 0.01
+    cont = down_and_out_call(s0, k, h, r, sigma, t, q)
+    rep.add(
+        "Checked against: Reiner-Rubinstein closed form for continuous monitoring, with the "
+        "Broadie-Glasserman-Kou (BGK) barrier shift H exp(-0.5826 sigma sqrt(T/m)) for m "
+        f"monitoring dates. S0=K=100, H=90. Continuous-monitoring price: {cont:.5f}. "
+        "400,000 paths."
+    )
+    rep.add()
+    brows = []
+    for m in (12, 52, 252):
+        res = price_down_and_out_call(s0, k, h, r, sigma, t, q=q, n_monitor=m, n_paths=400_000)
+        ref = down_and_out_call(s0, k, bgk_adjusted_barrier(h, sigma, t, m), r, sigma, t, q)
+        brows.append(
+            [
+                m,
+                f"{res.price:.5f}",
+                f"{res.std_error:.5f}",
+                f"{res.price - cont:+.5f}",
+                f"{ref:.5f}",
+                f"{res.price - ref:+.5f}",
+                f"{(res.price - ref) / res.std_error:+.2f}",
+                rep.verdict(res.contains(ref)),
+            ]
+        )
+    rep.table(
+        [
+            "Monitoring dates m",
+            "MC price",
+            "Std error",
+            "MC - continuous formula",
+            "BGK-corrected formula",
+            "MC - BGK",
+            "Error / SE",
+            "In 99% CI",
+        ],
+        brows,
+    )
+    rep.add(
+        "The uncorrected continuous formula is biased low by many standard errors even with "
+        "daily monitoring; the BGK shift removes the bias. Limitations: the correction is "
+        "asymptotic in m and degrades when the barrier is very close to the spot or m is small. "
+        "Only the down-and-out call with H <= K has a reference here."
+    )
+    rep.add()
+    rep.summary.append(
+        ["Down-and-out call (m=52)", "Closed form + BGK", brows[1][5], brows[1][2], brows[1][7]]
+    )
+
+    rep.add("### 3.3 American put (Longstaff-Schwartz)")
+    rep.add()
+    rep.add(
+        "Checked against: CRR binomial tree with 2,000 steps. LSM with 50 exercise dates prices "
+        "a Bermudan option, so the like-for-like reference is the tree with exercise allowed at "
+        "the same 50 dates. The fully American tree value is shown as well. K=40, r=0.06, T=1 "
+        "(cases from Longstaff and Schwartz, 2001, Table 1). 200,000 paths, cubic polynomial, "
+        "in-the-money paths only."
+    )
+    rep.add()
+    lrows = []
+    worst = None
+    for spot, vol in ((36.0, 0.2), (36.0, 0.4), (40.0, 0.2), (44.0, 0.2)):
+        args = {"s0": spot, "k": 40.0, "r": 0.06, "sigma": vol, "t": 1.0}
+        res = price_american_lsm(**args, n_steps=50, n_paths=200_000, seed=0)
+        berm = crr_price(**args, n_steps=2000, exercise_every=40)
+        amer = crr_price(**args, n_steps=2000)
+        euro = bs_price(**args, option="put")
+        lrows.append(
+            [
+                f"S0={spot:g}, sigma={vol:g}",
+                f"{euro:.4f}",
+                f"{amer:.4f}",
+                f"{berm:.4f}",
+                f"{res.price:.4f}",
+                f"{res.price - berm:+.4f}",
+                f"{res.std_error:.4f}",
+                rep.verdict(res.contains(berm)),
+                rep.verdict(res.ci99[0] > euro),
+            ]
+        )
+        if worst is None:
+            worst = lrows[-1]
+    rep.table(
+        [
+            "Case",
+            "European (BS)",
+            "CRR American",
+            "CRR Bermudan-50",
+            "LSM",
+            "LSM - Bermudan",
+            "Std error",
+            "In 99% CI",
+            "LSM > European",
+        ],
+        lrows,
+    )
+    rep.add(
+        "Limitations: LSM has two opposing biases. The fitted exercise rule is suboptimal (low "
+        "bias), and the same paths are used to fit and to value (high bias, small at this path "
+        "count). The standard error ignores the dependence created by the shared regression. A "
+        "separate out-of-sample valuation pass would give a clean lower bound. Polynomials in "
+        "S/K are adequate for one underlying; they do not scale to baskets."
+    )
+    rep.add()
+    rep.summary.append(
+        ["American put (LSM, S0=36)", "CRR tree, 2,000 steps", worst[5], worst[6], worst[7]]
+    )
+
+
+SECTIONS = [layer1, layer2, layer3]
 
 
 def main() -> int:

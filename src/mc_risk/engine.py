@@ -19,6 +19,7 @@ from mc_risk.payoffs import Payoff, european
 from mc_risk.result import PriceResult
 
 METHODS = ("plain", "antithetic", "sobol")
+MAX_NORMALS_PER_BATCH = 4_000_000
 
 
 @dataclass(frozen=True)
@@ -118,19 +119,25 @@ def mc_price(
         runtime = time.perf_counter() - start
         return PriceResult.from_samples(means, n_scrambles * 2**m, runtime, label, student_t=True)
 
-    if method == "antithetic":
-        half = n_paths // 2
-        w = brownian_increments(rng.standard_normal((half, n_steps)), t)
-        y_pos, x_pos = evaluate(w)
-        y_neg, x_neg = evaluate(-w)
-        y = 0.5 * (y_pos + y_neg)  # one sample per antithetic pair
-        x = 0.5 * (x_pos + x_neg) if control else None
-        n_paths = 2 * half
-    else:
-        y, x = evaluate(brownian_increments(rng.standard_normal((n_paths, n_steps)), t))
-
+    # Simulate in batches so path-dependent payoffs with many steps fit in memory.
+    antithetic = method == "antithetic"
+    n_draws = n_paths // 2 if antithetic else n_paths
+    batch = max(1, min(n_draws, MAX_NORMALS_PER_BATCH // n_steps))
+    ys, xs = [], []
+    for first in range(0, n_draws, batch):
+        size = min(batch, n_draws - first)
+        w = brownian_increments(rng.standard_normal((size, n_steps)), t)
+        y, x = evaluate(w)
+        if antithetic:  # one sample per antithetic pair
+            y_neg, x_neg = evaluate(-w)
+            y = 0.5 * (y + y_neg)
+            x = 0.5 * (x + x_neg) if control else None
+        ys.append(y)
+        xs.append(x)
+    y = np.concatenate(ys)
+    n_paths = 2 * n_draws if antithetic else n_draws
     if control:
-        y, _ = apply_control(y, x, control.price)
+        y, _ = apply_control(y, np.concatenate(xs), control.price)
     return PriceResult.from_samples(y, n_paths, time.perf_counter() - start, label)
 
 
