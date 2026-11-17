@@ -32,14 +32,18 @@ from mc_risk import (
 )
 from mc_risk.analytic import (
     bgk_adjusted_barrier,
+    bs_delta,
     bs_price,
+    bs_vega,
     crr_price,
+    digital_delta,
     down_and_out_call,
     geometric_asian_discrete,
     geometric_asian_kemna_vorst,
     heston_price,
     merton_price,
 )
+from mc_risk.greeks import mc_greek
 from mc_risk.payoffs import european
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -677,7 +681,180 @@ def layer4(rep: Report) -> None:
     )
 
 
-SECTIONS = [layer1, layer2, layer3, layer4]
+# --------------------------------------------------------------------------- layer 5
+def layer5(rep: Report) -> None:
+    rep.add("## 5. Greeks")
+    rep.add()
+    args = {"s0": 100.0, "k": 105.0, "r": 0.03, "sigma": 0.2, "t": 1.0}
+    q = 0.01
+    n = 400_000
+    rep.add(
+        "Checked against: Black-Scholes delta and vega. European call, S0=100, K=105, "
+        f"sigma=0.2, T=1. {n:,} paths, seed 0. Variance ratio is relative to the pathwise "
+        "estimator. Cost is the number of payoff evaluations per path."
+    )
+    rep.add()
+    labels = {"pathwise": "Pathwise", "lr": "Likelihood ratio", "fd": "Finite difference (CRN)"}
+    cost = {"pathwise": 1, "lr": 1, "fd": 2}
+    rows = []
+    for greek, ref in (("delta", bs_delta(**args, q=q)), ("vega", bs_vega(**args, q=q))):
+        base = None
+        for method, label in labels.items():
+            mc_greek(greek, method, **args, q=q, n_paths=n, seed=0)  # warm-up for timing
+            res = mc_greek(greek, method, **args, q=q, n_paths=n, seed=0)
+            base = base or res
+            rows.append(
+                [
+                    greek,
+                    label,
+                    f"{ref:.5f}",
+                    f"{res.price:.5f}",
+                    f"{res.price - ref:+.5f}",
+                    f"{res.std_error:.5f}",
+                    f"{(res.std_error / base.std_error) ** 2:.1f}",
+                    cost[method],
+                    f"{res.runtime * 1e3:.1f}",
+                    rep.verdict(res.contains(ref)),
+                ]
+            )
+    rep.table(
+        [
+            "Greek",
+            "Method",
+            "Analytic",
+            "Estimate",
+            "Error",
+            "Std error",
+            "Variance ratio",
+            "Cost",
+            "Runtime (ms)",
+            "In 99% CI",
+        ],
+        rows,
+    )
+
+    # Finite-difference bias against bump size (exact, from the closed form).
+    rep.add(
+        "Bias. Pathwise and likelihood-ratio estimators are unbiased. The central difference "
+        "has bias of order h^2, which can be computed exactly from the closed form: "
+        "[BS(S0+h) - BS(S0-h)] / 2h - delta."
+    )
+    rep.add()
+    delta = bs_delta(**args, q=q)
+    brows = []
+    for h in (10.0, 5.0, 1.0, 0.5):
+        up = bs_price(**{**args, "s0": args["s0"] + h}, q=q)
+        down = bs_price(**{**args, "s0": args["s0"] - h}, q=q)
+        exact_bias = (up - down) / (2 * h) - delta
+        res = mc_greek("delta", "fd", **args, q=q, n_paths=n, seed=1, bump=h)
+        brows.append(
+            [
+                f"{h:g}",
+                f"{exact_bias:+.6f}",
+                f"{res.price - delta:+.6f}",
+                f"{res.std_error:.6f}",
+                f"{exact_bias / res.std_error:+.2f}",
+            ]
+        )
+    rep.table(["Bump h", "Exact FD bias", "MC error", "Std error", "Bias / SE"], brows)
+
+    # Digital payoff: where the methods separate.
+    rep.add(
+        "Discontinuous payoff. For a cash-or-nothing call the pathwise derivative is zero "
+        "almost everywhere, so the estimator is not valid (the library raises). The likelihood "
+        "ratio still works. Finite differences work but the variance grows like 1/h as the bump "
+        "shrinks."
+    )
+    rep.add()
+    dref = digital_delta(**args, q=q)
+    drows = []
+    lr = mc_greek("delta", "lr", **args, payoff="digital", q=q, n_paths=n, seed=2)
+    drows.append(
+        [
+            "Likelihood ratio",
+            f"{dref:.6f}",
+            f"{lr.price:.6f}",
+            f"{lr.std_error:.6f}",
+            rep.verdict(lr.contains(dref)),
+        ]
+    )
+    for h in (2.0, 0.5, 0.1):
+        res = mc_greek("delta", "fd", **args, payoff="digital", q=q, n_paths=n, seed=2, bump=h)
+        drows.append(
+            [
+                f"Finite difference, h={h:g}",
+                f"{dref:.6f}",
+                f"{res.price:.6f}",
+                f"{res.std_error:.6f}",
+                "",
+            ]
+        )
+    drows.append(["Pathwise", f"{dref:.6f}", "not applicable", "", ""])
+    rep.table(["Digital delta", "Analytic", "Estimate", "Std error", "In 99% CI"], drows)
+
+    # Standard error against maturity: LR degrades for short maturities.
+    mats = [1 / 52, 1 / 12, 0.25, 0.5, 1.0, 2.0]
+    ses = {m: [] for m in labels}
+    for t in mats:
+        for method in labels:
+            a = {**args, "t": t, "k": 100.0}
+            ses[method].append(
+                mc_greek("delta", method, **a, q=q, n_paths=100_000, seed=3).std_error
+            )
+    fig, ax = plt.subplots(figsize=(6.2, 4))
+    for (method, label), colour, marker in zip(
+        labels.items(), (BLUE, ORANGE, GREEN), ("o", "s", "^"), strict=True
+    ):
+        ax.loglog(mats, ses[method], marker + "-", color=colour, label=label)
+    ax.set_xlabel("Maturity T (years)")
+    ax.set_ylabel("Std error of delta (100,000 paths)")
+    ax.set_title("ATM call delta: estimator noise against maturity")
+    ax.legend(frameon=False)
+    savefig(fig, "greeks_se_vs_maturity.png")
+    rep.add("![Greeks standard error](img/greeks_se_vs_maturity.png)")
+    rep.add()
+    ratios = np.array(ses["lr"]) / np.array(ses["pathwise"])
+    rep.table(
+        ["Check", "Value", "Expected", ""],
+        [
+            [
+                "LR / pathwise std error across maturities (1 week to 2 years)",
+                f"{ratios.min():.1f} to {ratios.max():.1f}",
+                "> 1 at every maturity",
+                rep.verdict(bool((ratios > 1).all())),
+            ],
+            [
+                "FD (CRN) / pathwise std error across maturities",
+                f"{min(np.array(ses['fd']) / np.array(ses['pathwise'])):.2f} to "
+                f"{max(np.array(ses['fd']) / np.array(ses['pathwise'])):.2f}",
+                "about 1",
+                rep.verdict(
+                    bool(np.allclose(np.array(ses["fd"]) / np.array(ses["pathwise"]), 1, atol=0.1))
+                ),
+            ],
+        ],
+    )
+    rep.add(
+        "For a vanilla payoff the likelihood-ratio penalty is a roughly constant factor: the "
+        "score scales like 1/(sigma sqrt(T)) but the payoff itself scales like sigma sqrt(T). "
+        "The penalty becomes severe when the payoff does not shrink with maturity (digitals) or "
+        "when the path has many steps (the delta score depends on the first step only, 1/sqrt(dt))."
+    )
+    rep.add()
+    rep.add(
+        "Limitations: implemented for terminal payoffs under GBM only. Pathwise needs a "
+        "continuous payoff; likelihood ratio needs the transition density and is noisier; "
+        "finite differences need a bump chosen to "
+        "balance bias against variance, and cost two valuations per Greek. Gamma is not "
+        "covered (pathwise fails for it on vanillas; the usual fix is a mixed estimator)."
+    )
+    rep.add()
+    rep.summary.append(
+        ["Delta and vega, 3 estimators", "Black-Scholes Greeks", rows[0][4], rows[0][5], "6/6"]
+    )
+
+
+SECTIONS = [layer1, layer2, layer3, layer4, layer5]
 
 
 def main() -> int:

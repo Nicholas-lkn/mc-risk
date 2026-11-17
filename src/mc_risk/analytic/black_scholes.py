@@ -39,3 +39,21 @@ def bs_vega(s0: float, k: float, r: float, sigma: float, t: float, q: float = 0.
     """dPrice/dSigma (same for calls and puts), per unit of volatility."""
     d1, _ = _d1_d2(s0, k, r, sigma, t, q)
     return s0 * math.exp(-q * t) * norm.pdf(d1) * math.sqrt(t)
+
+
+def digital_price(s0: float, k: float, r: float, sigma: float, t: float, q: float = 0.0) -> float:
+    """Cash-or-nothing call paying 1 if S_T > K."""
+    _, d2 = _d1_d2(s0, k, r, sigma, t, q)
+    return math.exp(-r * t) * norm.cdf(d2)
+
+
+def digital_delta(s0: float, k: float, r: float, sigma: float, t: float, q: float = 0.0) -> float:
+    """dPrice/dS0 of the cash-or-nothing call."""
+    _, d2 = _d1_d2(s0, k, r, sigma, t, q)
+    return math.exp(-r * t) * norm.pdf(d2) / (s0 * sigma * math.sqrt(t))
+
+
+def digital_vega(s0: float, k: float, r: float, sigma: float, t: float, q: float = 0.0) -> float:
+    """dPrice/dSigma of the cash-or-nothing call."""
+    d1, d2 = _d1_d2(s0, k, r, sigma, t, q)
+    return -math.exp(-r * t) * norm.pdf(d2) * d1 / sigma
