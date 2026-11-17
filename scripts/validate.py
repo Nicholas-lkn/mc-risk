@@ -18,6 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scipy
 
 from mc_risk import (
@@ -45,6 +46,26 @@ from mc_risk.analytic import (
 )
 from mc_risk.greeks import mc_greek
 from mc_risk.payoffs import european
+from mc_risk.risk import (
+    DEFAULT_WEIGHTS,
+    FX,
+    PORTFOLIO,
+    cad_returns,
+    factor_shock,
+    fit_student_t_dof,
+    fx_shock,
+    gaussian_mc_var,
+    gaussian_var_closed_form,
+    historical_replay,
+    historical_var,
+    load_prices,
+    rolling_backtest,
+    student_t_mc_var,
+    student_t_var_closed_form,
+    summarise_backtest,
+    synthetic_prices,
+    var_cvar,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 IMG = ROOT / "docs" / "img"
@@ -854,7 +875,281 @@ def layer5(rep: Report) -> None:
     )
 
 
-SECTIONS = [layer1, layer2, layer3, layer4, layer5]
+# --------------------------------------------------------------------------- layer 6
+PORTFOLIO_VALUE = 1_000_000.0  # CAD
+PRICE_FILE = ROOT / "data" / "prices.csv"
+
+
+def load_risk_data() -> tuple[pd.DataFrame, str]:
+    """Real prices if data/prices.csv exists, otherwise the synthetic generator."""
+    if PRICE_FILE.exists():
+        prices = load_prices(PRICE_FILE)
+        return prices, "real"
+    return synthetic_prices(seed=0), "synthetic"
+
+
+def layer6(rep: Report) -> None:
+    rep.add("## 6. Portfolio risk (base currency CAD)")
+    rep.add()
+    prices, source = load_risk_data()
+    rets = cad_returns(prices)
+    w = np.array([DEFAULT_WEIGHTS[t] for t in PORTFOLIO])
+    port = rets[PORTFOLIO].to_numpy() @ w
+    first, last = rets.index[0].date(), rets.index[-1].date()
+    if source == "real":
+        rep.add(
+            f"Data: daily adjusted closes from Yahoo Finance (`data/prices.csv`, not committed), "
+            f"{len(rets):,} return days from {first} to {last} after calendar alignment. US names "
+            "and SPY are converted to CAD with USDCAD (`CAD=X`)."
+        )
+    else:
+        rep.add(
+            "**Data: SYNTHETIC.** `data/prices.csv` was not found, so this section was built on "
+            "`mc_risk.risk.synthetic_prices`. The numbers below are not market results. Run "
+            "`uv run --extra data python scripts/download_data.py` and rerun this script."
+        )
+    rep.add()
+    weights_text = ", ".join(f"{t} {DEFAULT_WEIGHTS[t]:.0%}" for t in PORTFOLIO)
+    rep.add(
+        f"Portfolio: CAD {PORTFOLIO_VALUE:,.0f}, weights by market value: {weights_text}. "
+        "Weights are held constant (daily rebalancing). All risk numbers are 1-day, 99%."
+    )
+    rep.add()
+
+    ann = np.sqrt(252)
+    series = {
+        "Portfolio": port,
+        "XIU.TO (benchmark)": rets["XIU.TO"].to_numpy(),
+        "SPY in CAD (benchmark)": rets["SPY"].to_numpy(),
+        "USDCAD": rets[FX].to_numpy(),
+    }
+    win = 500
+    srows = []
+    for name, r in series.items():
+        v, c = var_cvar(-r[-win:], 0.99)
+        beta = np.cov(port, r)[0, 1] / r.var(ddof=1)
+        srows.append(
+            [
+                name,
+                f"{r.std(ddof=1) * ann:.1%}",
+                f"{v:.2%}",
+                f"{c:.2%}",
+                f"{np.corrcoef(port, r)[0, 1]:.2f}",
+                "" if name == "Portfolio" else f"{beta:.2f}",
+            ]
+        )
+    rep.table(
+        [
+            "Series",
+            "Annualised vol (full sample)",
+            f"Hist. VaR (last {win} days)",
+            f"Hist. CVaR (last {win} days)",
+            "Correlation with portfolio",
+            "Portfolio beta to it",
+        ],
+        srows,
+    )
+
+    rep.add(f"### 6.1 VaR and CVaR on the latest {win}-day window")
+    rep.add()
+    x = rets[PORTFOLIO].to_numpy()[-win:]
+    nu = fit_student_t_dof(x)
+    results = [
+        historical_var(x, w),
+        gaussian_mc_var(x, w, n_sims=400_000, seed=0),
+        student_t_mc_var(x, w, n_sims=400_000, seed=0, dof=nu),
+    ]
+    names = {
+        "historical": "Historical simulation",
+        "gaussian-mc": "Gaussian Monte Carlo",
+        "student-t-mc": f"Student-t Monte Carlo (fitted nu = {nu:.2f})",
+    }
+    rep.table(
+        ["Method", "VaR", "CVaR", "VaR (CAD)", "CVaR (CAD)", "CVaR / VaR", "Scenarios"],
+        [
+            [
+                names[r.method],
+                f"{r.var:.3%}",
+                f"{r.cvar:.3%}",
+                f"{r.var * PORTFOLIO_VALUE:,.0f}",
+                f"{r.cvar * PORTFOLIO_VALUE:,.0f}",
+                f"{r.cvar / r.var:.2f}",
+                f"{r.n_scenarios:,}",
+            ]
+            for r in results
+        ],
+    )
+    g_var, g_cvar = gaussian_var_closed_form(x, w)
+    t_var, t_cvar = student_t_var_closed_form(x, w, nu)
+    rep.add(
+        "Checked against: for a linear portfolio both parametric models have closed-form VaR "
+        "and CVaR, so the Monte Carlo engines can be verified exactly (tolerance 2% relative, "
+        "400,000 scenarios)."
+    )
+    rep.add()
+    checks = [
+        ("Gaussian MC VaR", results[1].var, g_var),
+        ("Gaussian MC CVaR", results[1].cvar, g_cvar),
+        ("Student-t MC VaR", results[2].var, t_var),
+        ("Student-t MC CVaR", results[2].cvar, t_cvar),
+    ]
+    rep.table(
+        ["Quantity", "Monte Carlo", "Closed form", "Relative error", ""],
+        [
+            [
+                n,
+                f"{mc:.4%}",
+                f"{cf:.4%}",
+                f"{mc / cf - 1:+.2%}",
+                rep.verdict(abs(mc / cf - 1) < 0.02),
+            ]
+            for n, mc, cf in checks
+        ],
+    )
+
+    rep.add("### 6.2 Rolling backtest")
+    rep.add()
+    rep.add(
+        f"Each day's VaR is estimated from the previous {win} days only and compared with the "
+        "loss realised that day. Monte Carlo methods use 20,000 scenarios per day; the Student-t "
+        "degrees of freedom are refitted every 21 days. Kupiec tests the exceedance rate, "
+        "Christoffersen tests that exceedances do not cluster, and conditional coverage tests "
+        "both. A p-value below 0.05 rejects the model."
+    )
+    rep.add()
+    bts = {}
+    brows = []
+    for method in ("historical", "gaussian-mc", "student-t-mc"):
+        bt = rolling_backtest(rets[PORTFOLIO], w, method, window=win, n_sims=20_000, seed=0)
+        bts[method] = bt
+        s = summarise_backtest(bt)
+        verdict = "not rejected" if min(s["kupiec_p"], s["cond_coverage_p"]) >= 0.05 else "rejected"
+        brows.append(
+            [
+                names[method].split(" (")[0],
+                s["days"],
+                s["exceedances"],
+                f"{s['expected']:.1f}",
+                f"{s['rate']:.2%}",
+                f"{s['kupiec_p']:.3f}",
+                f"{s['independence_p']:.3f}",
+                f"{s['cond_coverage_p']:.3f}",
+                f"{s['mean_exceed_ratio']:.2f}",
+                verdict,
+            ]
+        )
+    rep.table(
+        [
+            "Method",
+            "Days",
+            "Exceedances",
+            "Expected",
+            "Rate",
+            "Kupiec p",
+            "Independence p",
+            "Cond. coverage p",
+            "Mean loss / VaR on exceedance",
+            "At 5%",
+        ],
+        brows,
+    )
+    fig, axes = plt.subplots(3, 1, figsize=(8, 7.5), sharex=True)
+    for ax, (method, bt), colour in zip(axes, bts.items(), (BLUE, ORANGE, GREEN), strict=True):
+        ax.bar(bt.index, -bt["loss"] * 100, width=1.0, color="#c7ccd4", label="Daily P&L")
+        ax.plot(bt.index, -bt["var"] * 100, color=colour, lw=1.3, label="-VaR 99%")
+        hits = bt[bt["exceed"]]
+        ax.scatter(
+            hits.index,
+            -hits["loss"] * 100,
+            color="#c0392b",
+            s=18,
+            zorder=3,
+            label=f"Exceedances ({len(hits)})",
+        )
+        ax.set_title(names[method].split(" (")[0], loc="left", fontsize=10)
+        ax.set_ylabel("Return (%)")
+        ax.legend(frameon=False, ncol=3, fontsize=8, loc="lower left")
+    tag = "" if source == "real" else " [SYNTHETIC DATA]"
+    fig.suptitle(f"Rolling 1-day 99% VaR backtest, {win}-day window{tag}", fontsize=11)
+    savefig(fig, "var_backtest.png")
+    rep.add("![VaR backtest](img/var_backtest.png)")
+    rep.add()
+    rep.add(
+        "Backtest outcomes are findings about the models, not pass/fail checks on the code, so "
+        "they are not counted in the totals at the top of this report."
+    )
+    rep.add()
+
+    rep.add("### 6.3 Stress scenarios")
+    rep.add()
+    stress_rows = []
+    for label, start, end in (
+        ("COVID crash replay (2020-02-20 to 2020-03-23)", "2020-02-20", "2020-03-23"),
+        ("2022 rate-hike sell-off replay (2022-01-03 to 2022-06-16)", "2022-01-03", "2022-06-16"),
+    ):
+        try:
+            r = historical_replay(rets, DEFAULT_WEIGHTS, start, end)
+        except ValueError:
+            continue
+        stress_rows.append(
+            [
+                label,
+                f"{r['total_return']:+.1%}",
+                f"{r['total_return'] * PORTFOLIO_VALUE:+,.0f}",
+                f"worst day {r['worst_day']:+.1%} on {r['worst_day_date']}; "
+                f"max drawdown {r['max_drawdown']:.1%}",
+            ]
+        )
+    for label, change in (("CAD -10% against USD", -0.10), ("CAD +10% against USD", 0.10)):
+        r = fx_shock(DEFAULT_WEIGHTS, change)
+        stress_rows.append(
+            [
+                label,
+                f"{r:+.1%}",
+                f"{r * PORTFOLIO_VALUE:+,.0f}",
+                "translation effect on US names only",
+            ]
+        )
+    combo = factor_shock(DEFAULT_WEIGHTS, dict.fromkeys(PORTFOLIO, -0.20)) + fx_shock(
+        DEFAULT_WEIGHTS, -0.05
+    ) * (1 - 0.20)
+    stress_rows.append(
+        [
+            "Equities -20% in local currency with CAD -5%",
+            f"{combo:+.1%}",
+            f"{combo * PORTFOLIO_VALUE:+,.0f}",
+            "weaker CAD cushions the US holdings",
+        ]
+    )
+    rep.table(["Scenario", "Portfolio return", "P&L (CAD)", "Detail"], stress_rows)
+    rep.add(
+        "Note on the FX scenarios: the portfolio is long USD through its US holdings (50% of "
+        "value), so a weaker Canadian dollar is a gain and a stronger one is the loss scenario."
+    )
+    rep.add()
+    rep.add(
+        "Limitations: linear positions only (no options in the risk portfolio); constant "
+        "weights; historical simulation and both parametric fits weight the whole window "
+        "equally, so they react slowly when volatility jumps (no GARCH or EWMA filtering); the "
+        "Student-t model uses one degrees-of-freedom parameter for all names; Toronto and New "
+        "York closes are treated as simultaneous and single-market holidays are forward-filled; "
+        "about 12 expected exceedances gives the coverage tests limited power; adjusted closes "
+        "from Yahoo are not an audited data source."
+    )
+    rep.add()
+    hist_s = summarise_backtest(bts["historical"])
+    rep.summary.append(
+        [
+            f"Portfolio VaR, {source} data",
+            "Closed-form normal / Student-t VaR",
+            f"{results[1].var / g_var - 1:+.2%} (Gaussian MC)",
+            "n/a",
+            f"hist. backtest {hist_s['exceedances']} exceedances vs {hist_s['expected']:.1f} expected",
+        ]
+    )
+
+
+SECTIONS = [layer1, layer2, layer3, layer4, layer5, layer6]
 
 
 def main() -> int:
