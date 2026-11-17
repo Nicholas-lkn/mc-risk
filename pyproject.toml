@@ -34,6 +34,7 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["notebooks"]
 src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
