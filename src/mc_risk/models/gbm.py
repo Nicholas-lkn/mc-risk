@@ -53,3 +53,38 @@ def gbm_paths(
     rng = np.random.default_rng(seed)
     z = rng.standard_normal((n_paths, n_steps))
     return gbm_paths_from_brownian(s0, r, q, sigma, t, brownian_increments(z, t))
+
+
+def brownian_bridge(z: np.ndarray, t: float) -> np.ndarray:
+    """Brownian motion on an equally spaced grid built by Brownian bridge.
+
+    The first normal fixes W(T), the second the midpoint given the ends, and so
+    on by bisection. The paths have the same law as ``brownian_increments``, but
+    most of the variance is carried by the first few columns of ``z``. That
+    matters for Sobol points, whose leading dimensions are the best distributed.
+
+    Args:
+        z: standard normals, shape (n_paths, n_steps). Any n_steps >= 1 works.
+        t: horizon in years.
+
+    Returns:
+        W at times t/n, ..., t with shape (n_paths, n_steps).
+    """
+    n_paths, n = z.shape
+    grid = np.linspace(0.0, t, n + 1)
+    w = np.zeros((n_paths, n + 1))
+    w[:, n] = np.sqrt(t) * z[:, 0]
+    used = 1
+    queue = [(0, n)]
+    while queue:
+        left, right = queue.pop(0)
+        if right - left < 2:
+            continue
+        mid = (left + right) // 2
+        tl, tm, tr = grid[left], grid[mid], grid[right]
+        mean = ((tr - tm) * w[:, left] + (tm - tl) * w[:, right]) / (tr - tl)
+        std = np.sqrt((tm - tl) * (tr - tm) / (tr - tl))
+        w[:, mid] = mean + std * z[:, used]
+        used += 1
+        queue += [(left, mid), (mid, right)]
+    return w[:, 1:]

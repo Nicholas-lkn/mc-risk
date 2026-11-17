@@ -20,8 +20,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 
-from mc_risk import price_european
+from mc_risk import mc_price, price_european, variance_reduction_factor
 from mc_risk.analytic import bs_price
+from mc_risk.payoffs import european
 
 ROOT = Path(__file__).resolve().parents[1]
 IMG = ROOT / "docs" / "img"
@@ -166,7 +167,137 @@ def layer1(rep: Report) -> None:
     rep.summary.append(["European call/put (GBM)", "Black-Scholes", rows[2][3], rows[2][4], "8/8"])
 
 
-SECTIONS = [layer1]
+# --------------------------------------------------------------------------- layer 2
+def layer2(rep: Report) -> None:
+    rep.add("## 2. Variance reduction")
+    rep.add()
+    n = 2**18
+    rep.add(
+        f"Checked against: Black-Scholes price of the base-case call (K=105). Budget {n:,} path "
+        "evaluations per method, seed 0. Variance reduction factor (VRF) is the variance of plain "
+        "Monte Carlo over the variance of the method at equal budget. Efficiency also accounts "
+        "for runtime: VRF x (plain runtime / method runtime)."
+    )
+    rep.add()
+    ref = bs_price(**BASE)
+    labels = {
+        "plain": "Plain",
+        "antithetic": "Antithetic",
+        "control": "Control variate (underlying)",
+        "sobol": "Scrambled Sobol, 64 scrambles (RQMC)",
+    }
+    results = {}
+    for method in labels:
+        price_european(**BASE, n_paths=n, method=method, seed=0)  # warm-up for timing
+        results[method] = price_european(**BASE, n_paths=n, method=method, seed=0)
+    plain = results["plain"]
+    rows = []
+    for method, label in labels.items():
+        res = results[method]
+        vrf = variance_reduction_factor(plain, res)
+        rows.append(
+            [
+                label,
+                f"{res.price:.5f}",
+                f"{res.price - ref:+.5f}",
+                f"{res.std_error:.6f}",
+                f"{vrf:,.1f}",
+                f"{res.runtime * 1e3:.1f}",
+                f"{vrf * plain.runtime / res.runtime:,.1f}",
+                rep.verdict(res.contains(ref)),
+            ]
+        )
+    rep.table(
+        ["Method", "Price", "Error", "Std error", "VRF", "Runtime (ms)", "Efficiency", "In 99% CI"],
+        rows,
+    )
+    rep.table(
+        ["Check", "Value", "Expected", ""],
+        [
+            [
+                f"VRF of {labels[m]}",
+                f"{variance_reduction_factor(plain, results[m]):,.1f}",
+                "> 1",
+                rep.verdict(variance_reduction_factor(plain, results[m]) > 1),
+            ]
+            for m in ("antithetic", "control", "sobol")
+        ],
+    )
+
+    # Brownian bridge: same terminal payoff priced on a 64-step grid (64 dimensions).
+    rep.add(
+        "Effect of the Brownian bridge. The same call is priced on a 64-step path, so the Sobol "
+        "points are 64-dimensional. With the bridge, the first coordinate alone fixes the "
+        "terminal value; with incremental construction the payoff depends on all 64."
+    )
+    rep.add()
+    args = {k: v for k, v in BASE.items() if k != "k"}
+    common = {"n_steps": 64, "n_paths": 2**16, "seed": 0}
+    s0, r, sigma, t, q = args["s0"], args["r"], args["sigma"], args["t"], args["q"]
+    pay = european(BASE["k"])
+    runs = {
+        "Plain MC": mc_price(pay, s0, r, sigma, t, q=q, **common),
+        "Sobol, incremental": mc_price(
+            pay, s0, r, sigma, t, q=q, method="sobol", bridge=False, **common
+        ),
+        "Sobol, Brownian bridge": mc_price(pay, s0, r, sigma, t, q=q, method="sobol", **common),
+    }
+    base = runs["Plain MC"]
+    rep.table(
+        ["Construction", "Price", "Std error", "VRF vs plain", "In 99% CI"],
+        [
+            [
+                name,
+                f"{res.price:.5f}",
+                f"{res.std_error:.6f}",
+                f"{variance_reduction_factor(base, res):,.1f}",
+                rep.verdict(res.contains(ref)),
+            ]
+            for name, res in runs.items()
+        ],
+    )
+    # Coverage of the RQMC interval: how often does the 99% CI contain the true price?
+    rep.add(
+        "Coverage of the RQMC confidence interval. The scramble means are not exactly normal, so "
+        "the t interval built from a few scrambles can be too narrow. The table shows the share "
+        "of 200 independent replications (seeds 0 to 199, 65,536 points each) whose 99% CI "
+        "contains the Black-Scholes price. This is why the default is 64 scrambles, not 16."
+    )
+    rep.add()
+    cover_rows = []
+    for n_scr in (16, 32, 64):
+        hits = [
+            price_european(
+                **BASE, n_paths=2**16, method="sobol", seed=s, n_scrambles=n_scr
+            ).contains(ref)
+            for s in range(200)
+        ]
+        cover = float(np.mean(hits))
+        expected = ">= 0.97" if n_scr == 64 else "reported only"
+        mark = rep.verdict(cover >= 0.97) if n_scr == 64 else ""
+        cover_rows.append([n_scr, f"{cover:.3f}", expected, mark])
+    rep.table(["Scrambles", "Empirical coverage of 99% CI", "Expected", ""], cover_rows)
+    rep.add(
+        "Limitations: the RQMC standard error comes from a limited number of scramble means and "
+        "is itself noisy; coverage with few scrambles is below nominal (table above). The control "
+        "variate coefficient is estimated from the same sample, which introduces an O(1/N) bias. "
+        "Antithetic sampling helps monotone payoffs and can do nothing, or harm, for symmetric "
+        "ones such as straddles. Runtimes are single runs on the machine that built the report."
+    )
+    rep.add()
+    best = results["sobol"]
+    rep.summary.append(
+        [
+            "Variance reduction (European call)",
+            "Black-Scholes",
+            f"{best.price - ref:+.5f}",
+            f"{best.std_error:.6f}",
+            f"Sobol VRF {variance_reduction_factor(plain, best):,.0f}x",
+        ]
+    )
+
+
+SECTIONS = [layer1, layer2]
 
 
 def main() -> int:
