@@ -38,10 +38,10 @@ Checked against: Black-Scholes price of the base-case call (K=105). Budget 262,1
 
 | Method | Price | Error | Std error | VRF | Runtime (ms) | Efficiency | In 99% CI |
 |---|---|---|---|---|---|---|---|
-| Plain | 6.65259 | +0.01453 | 0.023600 | 1.0 | 6.7 | 1.0 | PASS |
-| Antithetic | 6.64941 | +0.01135 | 0.019757 | 1.4 | 4.5 | 2.1 | PASS |
-| Control variate (underlying) | 6.64500 | +0.00694 | 0.011816 | 4.0 | 10.4 | 2.6 | PASS |
-| Scrambled Sobol, 64 scrambles (RQMC) | 6.63795 | -0.00011 | 0.000286 | 6,788.6 | 31.8 | 1,423.4 | PASS |
+| Plain | 6.65259 | +0.01453 | 0.023600 | 1.0 | 6.9 | 1.0 | PASS |
+| Antithetic | 6.64941 | +0.01135 | 0.019757 | 1.4 | 4.4 | 2.2 | PASS |
+| Control variate (underlying) | 6.64500 | +0.00694 | 0.011816 | 4.0 | 11.5 | 2.4 | PASS |
+| Scrambled Sobol, 64 scrambles (RQMC) | 6.63795 | -0.00011 | 0.000286 | 6,788.6 | 30.2 | 1,547.6 | PASS |
 
 | Check | Value | Expected |  |
 |---|---|---|---|
@@ -84,9 +84,9 @@ The arithmetic Asian has no closed form. It is priced with the geometric Asian a
 
 | Arithmetic call | Price | Std error | 99% CI | Paths | VRF | Runtime (ms) |
 |---|---|---|---|---|---|---|
-| Plain | 5.05935 | 0.017016 | [5.01552, 5.10318] | 200,000 | 1 | 226 |
-| Geometric control variate | 5.07879 | 0.000457 | [5.07762, 5.07997] | 200,000 | 1,389 | 292 |
-| Sobol + bridge + control variate | 5.07867 | 0.000123 | [5.07834, 5.07899] | 131,072 | 29,134 | 453 |
+| Plain | 5.05935 | 0.017016 | [5.01552, 5.10318] | 200,000 | 1 | 290 |
+| Geometric control variate | 5.07879 | 0.000457 | [5.07762, 5.07997] | 200,000 | 1,389 | 277 |
+| Sobol + bridge + control variate | 5.07867 | 0.000123 | [5.07834, 5.07899] | 131,072 | 29,134 | 477 |
 
 | Check | Value | Expected |  |
 |---|---|---|---|
@@ -184,12 +184,12 @@ Checked against: Black-Scholes delta and vega. European call, S0=100, K=105, sig
 
 | Greek | Method | Analytic | Estimate | Error | Std error | Variance ratio | Cost | Runtime (ms) | In 99% CI |
 |---|---|---|---|---|---|---|---|---|---|
-| delta | Pathwise | 0.47767 | 0.47909 | +0.00142 | 0.00093 | 1.0 | 1 | 7.2 | PASS |
-| delta | Likelihood ratio | 0.47767 | 0.47838 | +0.00071 | 0.00198 | 4.5 | 1 | 6.9 | PASS |
-| delta | Finite difference (CRN) | 0.47767 | 0.47914 | +0.00147 | 0.00092 | 1.0 | 2 | 8.0 | PASS |
-| vega | Pathwise | 39.45914 | 39.54795 | +0.08881 | 0.11606 | 1.0 | 1 | 7.0 | PASS |
-| vega | Likelihood ratio | 39.45914 | 39.44433 | -0.01481 | 0.38226 | 10.8 | 1 | 7.2 | PASS |
-| vega | Finite difference (CRN) | 39.45914 | 39.54763 | +0.08849 | 0.11606 | 1.0 | 2 | 8.0 | PASS |
+| delta | Pathwise | 0.47767 | 0.47909 | +0.00142 | 0.00093 | 1.0 | 1 | 6.2 | PASS |
+| delta | Likelihood ratio | 0.47767 | 0.47838 | +0.00071 | 0.00198 | 4.5 | 1 | 6.0 | PASS |
+| delta | Finite difference (CRN) | 0.47767 | 0.47914 | +0.00147 | 0.00092 | 1.0 | 2 | 7.6 | PASS |
+| vega | Pathwise | 39.45914 | 39.54795 | +0.08881 | 0.11606 | 1.0 | 1 | 6.5 | PASS |
+| vega | Likelihood ratio | 39.45914 | 39.44433 | -0.01481 | 0.38226 | 10.8 | 1 | 8.6 | PASS |
+| vega | Finite difference (CRN) | 39.45914 | 39.54763 | +0.08849 | 0.11606 | 1.0 | 2 | 12.5 | PASS |
 
 Bias. Pathwise and likelihood-ratio estimators are unbiased. The central difference has bias of order h^2, which can be computed exactly from the closed form: [BS(S0+h) - BS(S0-h)] / 2h - delta.
 
@@ -285,9 +285,9 @@ Limitations: linear positions only (no options in the risk portfolio); constant 
 
 | Kernel | NumPy (ms) | Numba (ms) | Speed-up |
 |---|---|---|---|
-| GBM full paths (same normals, parallel loop) | 746 | 385 | 1.9x |
-| Arithmetic Asian payoff, plain MC (in-loop RNG, no path array) | 558 | 405 | 1.4x |
-| Heston terminal prices, full-truncation Euler | 839 | 694 | 1.2x |
+| GBM full paths (same normals, parallel loop) | 764 | 453 | 1.7x |
+| Arithmetic Asian payoff, plain MC (in-loop RNG, no path array) | 614 | 488 | 1.3x |
+| Heston terminal prices, full-truncation Euler | 805 | 694 | 1.2x |
 
 | Check | Value | Expected |  |
 |---|---|---|---|
