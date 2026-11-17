@@ -1165,7 +1165,8 @@ def layer6(rep: Report) -> None:
             "Closed-form normal / Student-t VaR",
             f"{results[1].var / g_var - 1:+.2%} (Gaussian MC)",
             "n/a",
-            f"hist. backtest {hist_s['exceedances']} exceedances vs {hist_s['expected']:.1f} expected",
+            f"hist. backtest {hist_s['exceedances']} exceedances "
+            f"vs {hist_s['expected']:.1f} expected",
         ]
     )
 
