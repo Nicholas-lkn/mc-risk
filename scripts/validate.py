@@ -26,6 +26,8 @@ from mc_risk import (
     price_asian,
     price_down_and_out_call,
     price_european,
+    price_european_heston,
+    price_european_merton,
     variance_reduction_factor,
 )
 from mc_risk.analytic import (
@@ -35,6 +37,8 @@ from mc_risk.analytic import (
     down_and_out_call,
     geometric_asian_discrete,
     geometric_asian_kemna_vorst,
+    heston_price,
+    merton_price,
 )
 from mc_risk.payoffs import european
 
@@ -513,7 +517,167 @@ def layer3(rep: Report) -> None:
     )
 
 
-SECTIONS = [layer1, layer2, layer3]
+# --------------------------------------------------------------------------- layer 4
+def layer4(rep: Report) -> None:
+    rep.add("## 4. Models: Heston and Merton")
+    rep.add()
+    heston = {
+        "s0": 100.0,
+        "v0": 0.04,
+        "r": 0.03,
+        "kappa": 2.0,
+        "theta": 0.04,
+        "xi": 0.3,
+        "rho": -0.7,
+        "t": 1.0,
+    }
+    rep.add("### 4.1 Heston, full-truncation Euler")
+    rep.add()
+    rep.add(
+        "Checked against: semi-analytic price from the characteristic function (Albrecher et "
+        "al. formulation, adaptive quadrature). Parameters v0=theta=0.04, kappa=2, xi=0.3, "
+        "rho=-0.7, r=0.03, T=1 (Feller condition holds: 2 kappa theta = 0.16 > xi^2 = 0.09). "
+        "200 time steps, 400,000 paths."
+    )
+    rep.add()
+    rows = []
+    for option in ("call", "put"):
+        for k in (80.0, 100.0, 120.0):
+            res = price_european_heston(
+                k=k, **heston, option=option, n_steps=200, n_paths=400_000, seed=0
+            )
+            rows.append(
+                rep.price_row(f"{option} K={k:g}", res, heston_price(k=k, **heston, option=option))
+            )
+    rep.table(PRICE_HEADERS, rows)
+    flat = bs_price(100.0, 100.0, 0.03, 0.2, 1.0)
+    limit = heston_price(k=100.0, **{**heston, "xi": 0.01, "rho": 0.0})
+    rep.table(
+        ["Check on the reference itself", "Value", "Expected", ""],
+        [
+            [
+                "Heston with xi=0.01, rho=0 vs Black-Scholes (sigma=0.2)",
+                f"{limit:.6f} vs {flat:.6f}",
+                "difference < 1e-3",
+                rep.verdict(abs(limit - flat) < 1e-3),
+            ]
+        ],
+    )
+
+    # Discretisation bias against the number of time steps, in a harder regime.
+    hard = {**heston, "kappa": 1.5, "xi": 0.6}
+    ref = heston_price(k=100.0, **hard)
+    steps = [2, 4, 8, 16, 32, 64, 128]
+    runs = [
+        price_european_heston(k=100.0, **hard, n_steps=n, n_paths=1_000_000, seed=100 + n)
+        for n in steps
+    ]
+    bias = np.array([x.price - ref for x in runs])
+    half = np.array([x.ci99[1] - x.price for x in runs])
+    fig, ax = plt.subplots(figsize=(6.2, 4))
+    ax.errorbar(steps, bias, yerr=half, fmt="o-", color=BLUE, capsize=3, label="MC - semi-analytic")
+    ax.axhline(0.0, color=GREY, lw=1)
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("Time steps per year")
+    ax.set_ylabel("Price error (bars: 99% CI of sampling error)")
+    ax.set_title("Heston full-truncation Euler: discretisation bias")
+    ax.legend(frameon=False)
+    savefig(fig, "heston_bias.png")
+    rep.add(
+        "Discretisation bias. A harder case where the Feller condition fails (kappa=1.5, "
+        f"xi=0.6, so 2 kappa theta = 0.12 < xi^2 = 0.36), ATM call, reference {ref:.5f}, "
+        "1,000,000 paths per point so the sampling error is small next to the bias at coarse "
+        "grids."
+    )
+    rep.add()
+    rep.add("![Heston bias](img/heston_bias.png)")
+    rep.add()
+    rep.table(
+        ["Time steps", "MC price", "Bias (MC - reference)", "Std error", "Bias / SE"],
+        [
+            [n, f"{x.price:.5f}", f"{b:+.5f}", f"{x.std_error:.5f}", f"{b / x.std_error:+.1f}"]
+            for n, x, b in zip(steps, runs, bias, strict=True)
+        ],
+    )
+    rep.table(
+        ["Check", "Value", "Expected", ""],
+        [
+            [
+                "Bias at 128 steps inside 99% CI",
+                f"{bias[-1]:+.5f}",
+                "yes",
+                rep.verdict(runs[-1].contains(ref)),
+            ],
+            [
+                "Bias at 2 steps is detectable (scheme is not exact)",
+                f"{bias[0] / runs[0].std_error:+.1f} SE",
+                "abs(bias) > 3 SE",
+                rep.verdict(abs(bias[0]) > 3 * runs[0].std_error),
+            ],
+        ],
+    )
+    rep.add(
+        "Limitations: the confidence interval covers sampling error only, so a coarse grid can "
+        "give a tight interval around the wrong number. Full truncation is first-order at best "
+        "and slows down when the Feller condition fails; the quadratic-exponential scheme of "
+        "Andersen (2008) or exact simulation (Broadie and Kaya, 2006) would be the next step. "
+        "Parameters are illustrative, not calibrated to a market smile."
+    )
+    rep.add()
+    rep.summary.append(
+        ["European (Heston, 200 steps)", "Semi-analytic (CF)", rows[1][3], rows[1][4], "6/6"]
+    )
+
+    rep.add("### 4.2 Merton jump diffusion")
+    rep.add()
+    merton = {
+        "s0": 100.0,
+        "r": 0.03,
+        "sigma": 0.15,
+        "lam": 0.5,
+        "mu_j": -0.1,
+        "delta": 0.15,
+        "t": 1.0,
+    }
+    rep.add(
+        "Checked against: Merton's series of Black-Scholes prices (60 terms). sigma=0.15, "
+        "lambda=0.5 jumps per year, log jump size N(-0.10, 0.15^2). The terminal price is "
+        "simulated exactly, so there is no discretisation bias. 400,000 paths."
+    )
+    rep.add()
+    mrows = []
+    for option in ("call", "put"):
+        for k in (80.0, 100.0, 120.0):
+            res = price_european_merton(k=k, **merton, option=option, n_paths=400_000, seed=0)
+            mrows.append(
+                rep.price_row(f"{option} K={k:g}", res, merton_price(k=k, **merton, option=option))
+            )
+    rep.table(PRICE_HEADERS, mrows)
+    no_jump = merton_price(k=100.0, **{**merton, "lam": 0.0})
+    bs_ref = bs_price(100.0, 100.0, 0.03, 0.15, 1.0)
+    rep.table(
+        ["Check on the reference itself", "Value", "Expected", ""],
+        [
+            [
+                "Series with lambda=0 vs Black-Scholes",
+                f"{no_jump:.8f} vs {bs_ref:.8f}",
+                "equal to 1e-10",
+                rep.verdict(abs(no_jump - bs_ref) < 1e-10),
+            ]
+        ],
+    )
+    rep.add(
+        "Limitations: jump sizes are lognormal and independent of the diffusion, with constant "
+        "intensity. Jump payoffs are heavy-tailed, so standard errors for far out-of-the-money "
+        "options converge slowly."
+    )
+    rep.add()
+    rep.summary.append(
+        ["European (Merton jumps)", "Merton series", mrows[1][3], mrows[1][4], "6/6"]
+    )
+
+
+SECTIONS = [layer1, layer2, layer3, layer4]
 
 
 def main() -> int:
