@@ -9,8 +9,10 @@ here. The script exits with a non-zero status if any check fails.
 from __future__ import annotations
 
 import math
+import os
 import platform
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -45,6 +47,7 @@ from mc_risk.analytic import (
     merton_price,
 )
 from mc_risk.greeks import mc_greek
+from mc_risk.models import gbm_paths, heston_paths
 from mc_risk.payoffs import european
 from mc_risk.risk import (
     DEFAULT_WEIGHTS,
@@ -1149,7 +1152,95 @@ def layer6(rep: Report) -> None:
     )
 
 
-SECTIONS = [layer1, layer2, layer3, layer4, layer5, layer6]
+# --------------------------------------------------------------------------- layer 7
+def _best_of(fn, repeats: int = 3) -> float:
+    times = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        fn()
+        times.append(time.perf_counter() - start)
+    return min(times)
+
+
+def layer7(rep: Report) -> None:
+    rep.add("## 7. Numba benchmark")
+    rep.add()
+    try:
+        import numba
+
+        from mc_risk import fast
+    except ImportError:
+        rep.add("Numba is not installed (`uv sync --extra fast`); benchmark skipped.")
+        rep.add()
+        return
+    n_paths, n_steps = 100_000, 252
+    g = (100.0, 0.03, 0.2, 1.0)
+    h = {"s0": 100.0, "v0": 0.04, "r": 0.03, "kappa": 2.0, "theta": 0.04, "xi": 0.3, "rho": -0.7}
+    asian = {"s0": 100.0, "k": 100.0, "r": 0.03, "sigma": 0.2, "t": 1.0}
+    cases = [
+        (
+            "GBM full paths (same normals, parallel loop)",
+            lambda: gbm_paths(*g, n_steps, n_paths, seed=0),
+            lambda: fast.gbm_paths_numba(*g, n_steps, n_paths, seed=0),
+        ),
+        (
+            "Arithmetic Asian payoff, plain MC (in-loop RNG, no path array)",
+            lambda: price_asian(
+                **asian, n_steps=n_steps, n_paths=n_paths, control_variate=False, seed=0
+            ),
+            lambda: fast.price_asian_numba(**asian, n_steps=n_steps, n_paths=n_paths, seed=0),
+        ),
+        (
+            "Heston terminal prices, full-truncation Euler",
+            lambda: heston_paths(**h, t=1.0, n_steps=n_steps, n_paths=n_paths, full_path=False),
+            lambda: fast.heston_terminal_numba(**h, t=1.0, n_steps=n_steps, n_paths=n_paths),
+        ),
+    ]
+    rows = []
+    for name, numpy_fn, numba_fn in cases:
+        numba_fn()  # compile
+        t_np, t_nb = _best_of(numpy_fn), _best_of(numba_fn)
+        rows.append([name, f"{t_np * 1e3:.0f}", f"{t_nb * 1e3:.0f}", f"{t_np / t_nb:.1f}x"])
+    rep.add(
+        f"{n_paths:,} paths x {n_steps} steps, best of 3 after compilation, on "
+        f"{os.cpu_count()} CPU cores (Numba {numba.__version__}). Timings depend on the machine; "
+        "the ratios are the point."
+    )
+    rep.add()
+    rep.table(["Kernel", "NumPy (ms)", "Numba (ms)", "Speed-up"], rows)
+    same = np.allclose(gbm_paths(*g, 12, 2000, seed=5), fast.gbm_paths_numba(*g, 12, 2000, seed=5))
+    ref = price_asian(**asian, n_steps=50, n_paths=200_000, seed=1)
+    nb = fast.price_asian_numba(**asian, n_steps=50, n_paths=200_000, seed=1)
+    rep.table(
+        ["Check", "Value", "Expected", ""],
+        [
+            [
+                "Numba GBM paths equal NumPy paths for the same seed",
+                str(same),
+                "True",
+                rep.verdict(same),
+            ],
+            [
+                "Numba Asian price vs control-variate price",
+                f"{nb.price:.4f} vs {ref.price:.4f} (SE {nb.std_error:.4f})",
+                "inside 99% CI",
+                rep.verdict(nb.contains(ref.price)),
+            ],
+        ],
+    )
+    rep.add(
+        "Reading the table: NumPy's vectorised generator is already fast, so random number "
+        "generation dominates and the gain from compiling the loop is modest; it scales with "
+        "core count because the kernels are parallel. Limitations: the in-loop kernels use "
+        "Numba's Mersenne Twister generator, reseeded per chunk of 1,024 paths from (seed, chunk "
+        "index), so they are reproducible but do not match the NumPy pricers path by path, and "
+        "chunk streams are not formally guaranteed independent. Only plain Monte Carlo is "
+        "accelerated; a good control variate (section 3.1) buys far more than a faster loop."
+    )
+    rep.add()
+
+
+SECTIONS = [layer1, layer2, layer3, layer4, layer5, layer6, layer7]
 
 
 def main() -> int:
